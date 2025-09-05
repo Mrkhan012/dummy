@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:audioplayers/audioplayers.dart';
@@ -11,10 +12,10 @@ class SnakeGameApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Snake Game',
+      title: 'Snake Modern',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(useMaterial3: true),
       home: const SnakeGame(),
-      debugShowCheckedModeBanner: false,
     );
   }
 }
@@ -28,10 +29,11 @@ class SnakeGame extends StatefulWidget {
   State<SnakeGame> createState() => _SnakeGameState();
 }
 
-class _SnakeGameState extends State<SnakeGame> {
+class _SnakeGameState extends State<SnakeGame> with SingleTickerProviderStateMixin {
+  // grid
   static const int rowCount = 20, colCount = 20;
   static const int totalCells = rowCount * colCount;
-  final random = Random();
+  final Random random = Random();
 
   // game state
   List<int> snake = [45, 65, 85];
@@ -45,23 +47,30 @@ class _SnakeGameState extends State<SnakeGame> {
   bool obstaclesEnabled = false;
   Set<int> obstacles = {};
 
-  // settings & persistence
+  // persistence & audio
   int highScore = 0;
   Difficulty difficulty = Difficulty.medium;
-  final AudioPlayer _audioPlayer = AudioPlayer(); // for short effects
   Duration tickDuration = const Duration(milliseconds: 140);
+  final AudioPlayer _audioPlayer = AudioPlayer();
 
+  // gestures
   Offset? _dragStart;
+
+  // UI anim
+  late AnimationController _pulseController;
 
   @override
   void initState() {
     super.initState();
     _loadPrefs();
+    _pulseController = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))
+      ..repeat(reverse: true);
   }
 
   @override
   void dispose() {
     timer?.cancel();
+    _pulseController.dispose();
     _audioPlayer.dispose();
     super.dispose();
   }
@@ -103,13 +112,10 @@ class _SnakeGameState extends State<SnakeGame> {
       food = randomFood();
       score = 0;
       isPlaying = true;
-      // regenerate obstacles only if enabled
       if (obstaclesEnabled) _generateObstacles();
     });
     timer?.cancel();
-    timer = Timer.periodic(tickDuration, (timer) {
-      updateSnake();
-    });
+    timer = Timer.periodic(tickDuration, (_) => updateSnake());
   }
 
   void pauseGame() {
@@ -128,77 +134,15 @@ class _SnakeGameState extends State<SnakeGame> {
 
   void _generateObstacles() {
     obstacles.clear();
-    final numObs = 20; // tweakable
+    final numObs = 18;
     while (obstacles.length < numObs) {
       final pos = random.nextInt(totalCells);
       if (!snake.contains(pos) && pos != food) obstacles.add(pos);
     }
   }
 
-  void endGame() {
-    timer?.cancel();
-    // play die sound (ignore errors)
-    _playLocalSound('assets/sounds/die.wav');
-    setState(() => isPlaying = false);
-
-    // update high score
-    if (score > highScore) {
-      highScore = score;
-      _savePrefs();
-    }
-
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Center(child: Text('Game Over', style: TextStyle(fontWeight: FontWeight.bold))),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text('Score: $score', style: const TextStyle(fontSize: 20)),
-            const SizedBox(height: 8),
-            Text('High Score: $highScore', style: const TextStyle(fontSize: 16, color: Colors.grey)),
-            const SizedBox(height: 18),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                    startGame();
-                  },
-                  icon: const Icon(Icons.replay),
-                  label: const Text('Restart'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.greenAccent,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                OutlinedButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Close')),
-              ],
-            )
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _playLocalSound(String assetPath) async {
-    try {
-      await _audioPlayer.play(AssetSource(assetPath.replaceFirst('assets/', ''))); 
-      // Note: audioplayers's AssetSource expects path inside assets/ when configured.
-      // Some versions accept AssetSource('sounds/bite.wav') if declared as assets/sounds/...
-    } catch (e) {
-      // ignore
-    }
-  }
-
   void changeDirection(Direction d) {
     if (!isPlaying) return;
-    // Prevent reversing
     if (direction == Direction.left && d == Direction.right) return;
     if (direction == Direction.right && d == Direction.left) return;
     if (direction == Direction.up && d == Direction.down) return;
@@ -211,31 +155,17 @@ class _SnakeGameState extends State<SnakeGame> {
       final newHead = calcNewHead();
       final x = newHead % colCount, y = newHead ~/ colCount;
 
-      // wall collision
-      if (x < 0 || x >= colCount || y < 0 || y >= rowCount) {
-        endGame();
-        return;
-      }
-
-      // obstacle collision
-      if (obstacles.contains(newHead)) {
-        endGame();
-        return;
-      }
-
-      // self collision
-      if (snake.contains(newHead)) {
+      // wall or obstacle or self collision => game over
+      if (x < 0 || x >= colCount || y < 0 || y >= rowCount || obstacles.contains(newHead) || snake.contains(newHead)) {
+        _playSound('sounds/die.wav');
         endGame();
         return;
       }
 
       snake.add(newHead);
-
-      // ate food
       if (newHead == food) {
-        score += 1;
-        // play bite sound
-        _playLocalSound('assets/sounds/bite.mp3');
+        score++;
+        _playSound('sounds/bite.mp3');
         food = randomFood();
       } else {
         snake.removeAt(0);
@@ -257,73 +187,35 @@ class _SnakeGameState extends State<SnakeGame> {
     }
   }
 
-  Widget getGridCell(int index, double gap) {
-    final bool isBody = snake.contains(index);
-    final bool isHead = isBody && index == snake.last;
-    final bool isFood = index == food;
-    final bool isObstacle = obstacles.contains(index);
-
-    if (isFood) {
-      return Container(
-        margin: EdgeInsets.all(gap),
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: const RadialGradient(colors: [Colors.orange, Colors.red]),
-          boxShadow: [BoxShadow(color: Colors.redAccent.withOpacity(0.45), blurRadius: 8, spreadRadius: 1)],
-        ),
-      );
+  void endGame() {
+    timer?.cancel();
+    setState(() => isPlaying = false);
+    if (score > highScore) {
+      highScore = score;
+      _savePrefs();
     }
-
-    if (isObstacle) {
-      return Container(
-        margin: EdgeInsets.all(gap),
-        decoration: BoxDecoration(
-          color: Colors.grey.shade700,
-          borderRadius: BorderRadius.circular(6),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.25), blurRadius: 4)],
-        ),
-      );
-    }
-
-    if (isBody) {
-      return AnimatedContainer(
-        duration: const Duration(milliseconds: 80),
-        margin: EdgeInsets.all(gap),
-        decoration: BoxDecoration(
-          gradient: isHead
-              ? const LinearGradient(colors: [Color(0xFF64FFDA), Color(0xFF00C853)])
-              : const LinearGradient(colors: [Color(0xFFB9F6CA), Color(0xFF69F0AE)]),
-          borderRadius: BorderRadius.circular(8),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 6, offset: const Offset(0, 3))],
-        ),
-      );
-    }
-
-    // empty cell
-    return Container(
-      margin: EdgeInsets.all(gap),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.85),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: Colors.grey.withOpacity(0.12), width: 0.5),
-      ),
-    );
+    Future.delayed(const Duration(milliseconds: 100), () => _showGameOverDialog());
   }
 
-  void _onPanStart(DragStartDetails details) {
-    _dragStart = details.globalPosition;
+  Future<void> _playSound(String assetPath) async {
+    try {
+      await _audioPlayer.play(AssetSource(assetPath));
+    } catch (_) {
+      // ignore sound errors
+    }
   }
 
-  void _onPanUpdate(DragUpdateDetails details) {
-    if (_dragStart == null) _dragStart = details.globalPosition - details.delta;
-    final current = details.globalPosition;
+  // Gesture handlers
+  void _onPanStart(DragStartDetails d) => _dragStart = d.globalPosition;
+
+  void _onPanUpdate(DragUpdateDetails d) {
+    if (_dragStart == null) _dragStart = d.globalPosition - d.delta;
+    final current = d.globalPosition;
     final dx = current.dx - _dragStart!.dx;
     final dy = current.dy - _dragStart!.dy;
     final absDx = dx.abs(), absDy = dy.abs();
     const threshold = 8.0;
-
     if (absDx < threshold && absDy < threshold) return;
-
     if (absDx > absDy) {
       if (dx > 0) changeDirection(Direction.right);
       else changeDirection(Direction.left);
@@ -331,183 +223,308 @@ class _SnakeGameState extends State<SnakeGame> {
       if (dy > 0) changeDirection(Direction.down);
       else changeDirection(Direction.up);
     }
-
     _dragStart = current;
   }
 
-  // UI: difficulty dialog
-  Future<void> _showDifficultyDialog() async {
+  // UI Dialogs & utilities
+  Future<void> _showGameOverDialog() async {
+    await showDialog(
+      context: context,
+      builder: (_) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: _GlassCard(
+            child: Padding(
+              padding: const EdgeInsets.all(18.0),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Text('Game Over', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                Text('Score: $score', style: const TextStyle(fontSize: 18)),
+                const SizedBox(height: 4),
+                Text('High: $highScore', style: TextStyle(color: Colors.grey.shade700)),
+                const SizedBox(height: 16),
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(context);
+                      startGame();
+                    },
+                    icon: const Icon(Icons.replay),
+                    label: const Text('Restart'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.greenAccent, foregroundColor: Colors.black),
+                  ),
+                  const SizedBox(width: 12),
+                  OutlinedButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Close'),
+                  ),
+                ])
+              ]),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showDifficultySheet() async {
     final result = await showModalBottomSheet<Difficulty>(
       context: context,
-      builder: (context) {
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (c) {
         return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 20.0),
+          padding: const EdgeInsets.symmetric(vertical: 14),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const Text('Choose Difficulty', style: TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            ListTile(
+            const Text('Choose Difficulty', style: TextStyle(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 8),
+            RadioListTile<Difficulty>(
               title: const Text('Easy'),
-              leading: Radio<Difficulty>(value: Difficulty.easy, groupValue: difficulty, onChanged: (v) => Navigator.of(context).pop(v)),
+              value: Difficulty.easy,
+              groupValue: difficulty,
+              onChanged: (v) => Navigator.pop(context, v),
             ),
-            ListTile(
+            RadioListTile<Difficulty>(
               title: const Text('Medium'),
-              leading: Radio<Difficulty>(value: Difficulty.medium, groupValue: difficulty, onChanged: (v) => Navigator.of(context).pop(v)),
+              value: Difficulty.medium,
+              groupValue: difficulty,
+              onChanged: (v) => Navigator.pop(context, v),
             ),
-            ListTile(
+            RadioListTile<Difficulty>(
               title: const Text('Hard'),
-              leading: Radio<Difficulty>(value: Difficulty.hard, groupValue: difficulty, onChanged: (v) => Navigator.of(context).pop(v)),
+              value: Difficulty.hard,
+              groupValue: difficulty,
+              onChanged: (v) => Navigator.pop(context, v),
             ),
+            const SizedBox(height: 8),
           ]),
         );
       },
     );
+
     if (result != null) {
       setState(() {
         difficulty = result;
         tickDuration = _durationForDifficulty(difficulty);
         if (isPlaying) {
-          // restart timer with new speed
           timer?.cancel();
-          timer = Timer.periodic(tickDuration, (t) => updateSnake());
+          timer = Timer.periodic(tickDuration, (_) => updateSnake());
         }
       });
       _savePrefs();
     }
   }
 
-  // toggle obstacles
   void _toggleObstacles() {
     setState(() {
       obstaclesEnabled = !obstaclesEnabled;
-      if (obstaclesEnabled) {
-        _generateObstacles();
-      } else {
-        obstacles.clear();
-      }
+      if (obstaclesEnabled) _generateObstacles();
+      else obstacles.clear();
       _savePrefs();
     });
   }
 
+  // UI building
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      // immersive modern background
       body: SafeArea(
         child: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(colors: [Color(0xFFe0f7fa), Color(0xFFe8f5e9)], begin: Alignment.topCenter, end: Alignment.bottomCenter),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(colors: [const Color(0xFFe6f7ff), const Color(0xFFeef9f1)], begin: Alignment.topCenter, end: Alignment.bottomCenter),
           ),
           child: LayoutBuilder(builder: (context, constraints) {
             final screenW = constraints.maxWidth;
             final screenH = constraints.maxHeight;
-            final topReserved = max(88.0, screenH * 0.10);
-            final availableHeight = screenH - topReserved - 24;
-            final boardSize = min(screenW - 24, availableHeight);
+            final topReserved = max(92.0, screenH * 0.10);
+            final availableHeight = screenH - topReserved - 28;
+            final boardSize = min(screenW - 32, availableHeight);
             final rawCellSize = boardSize / colCount;
             final gap = max(1.0, rawCellSize * 0.06);
 
-            return Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  child: Row(children: [
-                    Expanded(
-                      child: Container(
+            return Column(children: [
+              // top bar
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                child: Row(children: [
+                  Expanded(
+                    child: _GlassCard(
+                      child: Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.9),
-                          borderRadius: BorderRadius.circular(14),
-                          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 8, offset: const Offset(0, 4))],
-                        ),
                         child: Row(children: [
-                          const Icon(Icons.emoji_events, color: Color(0xFF16A085)),
-                          const SizedBox(width: 8),
-                          Text('Score: $score', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(color: Colors.white.withOpacity(0.95), borderRadius: BorderRadius.circular(10)),
+                            child: const Icon(Icons.emoji_events, color: Color(0xFF0E9F8B)),
+                          ),
+                          const SizedBox(width: 10),
+                          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            const Text('Score', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                            const SizedBox(height: 2),
+                            Text('$score', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                          ]),
                           const Spacer(),
                           Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                            Text('High: $highScore', style: TextStyle(color: Colors.grey.shade700, fontSize: 12)),
+                            Row(children: [
+                              const Icon(Icons.star, size: 16, color: Color(0xFFFFC107)),
+                              const SizedBox(width: 6),
+                              Text('$highScore', style: const TextStyle(fontWeight: FontWeight.w700)),
+                            ]),
+                            const SizedBox(height: 4),
                             Text(_difficultyLabel(), style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
                           ])
                         ]),
                       ),
                     ),
-                    const SizedBox(width: 12),
-                    Column(children: [
-                      ElevatedButton(
-                        onPressed: () {
-                          if (isPlaying) pauseGame();
-                          else startGame();
-                        },
-                        style: ElevatedButton.styleFrom(
-                          elevation: 0,
-                          backgroundColor: isPlaying ? Colors.orangeAccent : Colors.deepPurpleAccent,
-                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ),
-                        child: Row(children: [Icon(isPlaying ? Icons.pause : Icons.play_arrow), const SizedBox(width: 6), Text(isPlaying ? 'Pause' : 'Play')]),
+                  ),
+                  const SizedBox(width: 12),
+
+                  // Animated Play/Pause floating button
+                  ScaleTransition(
+                    scale: Tween(begin: 1.0, end: 1.06).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut)),
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: isPlaying ? Colors.orangeAccent : Colors.deepPurpleAccent,
+                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                        elevation: 8,
                       ),
-                      const SizedBox(height: 8),
-                      IconButton(
-                        onPressed: _showDifficultyDialog,
-                        icon: const Icon(Icons.speed),
-                        tooltip: 'Difficulty',
+                      onPressed: () {
+                        if (isPlaying) pauseGame();
+                        else startGame();
+                      },
+                      child: Row(children: [Icon(isPlaying ? Icons.pause : Icons.play_arrow), const SizedBox(width: 6), Text(isPlaying ? 'Pause' : 'Play')]),
+                    ),
+                  ),
+                ]),
+              ),
+
+              // board
+              Expanded(
+                child: Center(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onPanStart: _onPanStart,
+                    onPanUpdate: _onPanUpdate,
+                    child: Container(
+                      width: boardSize,
+                      height: boardSize,
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(18),
+                        gradient: LinearGradient(colors: [Colors.white.withOpacity(0.95), Colors.white.withOpacity(0.88)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+                        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 16, offset: const Offset(0, 10))],
                       ),
-                    ])
-                  ]),
-                ),
-                Expanded(
-                  child: Center(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onPanStart: _onPanStart,
-                      onPanUpdate: _onPanUpdate,
-                      child: Container(
-                        width: boardSize,
-                        height: boardSize,
-                        padding: const EdgeInsets.all(6),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(16),
-                          gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Colors.white.withOpacity(0.95), Colors.white.withOpacity(0.9)]),
-                          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 12, offset: const Offset(0, 8))],
-                        ),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: GridView.builder(
-                            physics: const NeverScrollableScrollPhysics(),
-                            itemCount: totalCells,
-                            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: colCount, childAspectRatio: 1),
-                            itemBuilder: (context, idx) => getGridCell(idx, gap),
-                          ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: GridView.builder(
+                          physics: const NeverScrollableScrollPhysics(),
+                          itemCount: totalCells,
+                          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: colCount, childAspectRatio: 1),
+                          itemBuilder: (context, index) => _buildCell(index, gap),
                         ),
                       ),
                     ),
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 10),
-                  child: Row(children: [
-                    Expanded(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                        decoration: BoxDecoration(color: Colors.white.withOpacity(0.92), borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 8)]),
-                        child: Text('Swipe anywhere to change direction. Eat food, avoid walls & obstacles.', textAlign: TextAlign.center, style: const TextStyle(fontSize: 14)),
+              ),
+
+              // bottom controls
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 12),
+                child: Row(children: [
+                  Expanded(
+                    child: _GlassCard(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                          const Icon(Icons.swipe, size: 18),
+                          const SizedBox(width: 8),
+                          const Expanded(child: Text('Swipe anywhere to change direction • Avoid walls & obstacles', style: TextStyle(fontSize: 13))),
+                        ]),
                       ),
                     ),
-                    const SizedBox(width: 10),
-                    Column(children: [
-                      Row(children: [
-                        const Text('Obstacles', style: TextStyle(fontSize: 12)),
-                        Switch(value: obstaclesEnabled, onChanged: (_) => _toggleObstacles()),
-                      ]),
-                      const SizedBox(height: 6),
-                      OutlinedButton(onPressed: () { setState(() { score = 0; highScore = 0; _savePrefs(); }); }, child: const Text('Reset High'))
+                  ),
+                  const SizedBox(width: 12),
+                  Column(children: [
+                    Row(children: [
+                      const Text('Obstacles', style: TextStyle(fontSize: 12)),
+                      const SizedBox(width: 6),
+                      Transform.scale(
+                        scale: 0.95,
+                        child: Switch(
+                          value: obstaclesEnabled,
+                          onChanged: (_) => _toggleObstacles(),
+                          activeColor: const Color(0xFF0E9F8B),
+                        ),
+                      ),
+                    ]),
+                    const SizedBox(height: 6),
+                    Row(children: [
+                      IconButton(onPressed: _showDifficultySheet, icon: const Icon(Icons.speed)),
+                      OutlinedButton(onPressed: () { setState(() { score = 0; highScore = 0; _savePrefs(); }); }, child: const Text('Reset High')),
                     ])
-                  ]),
-                )
-              ],
-            );
+                  ])
+                ]),
+              ),
+            ]);
           }),
         ),
       ),
+    );
+  }
+
+  Widget _buildCell(int index, double gap) {
+    final bool isBody = snake.contains(index);
+    final bool isHead = isBody && index == snake.last;
+    final bool isFood = index == food;
+    final bool isObs = obstacles.contains(index);
+
+    if (isFood) {
+      return Container(
+        margin: EdgeInsets.all(gap),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: RadialGradient(colors: [Colors.orange.shade300, Colors.red.shade700]),
+          boxShadow: [BoxShadow(color: Colors.redAccent.withOpacity(0.42), blurRadius: 8, spreadRadius: 1)],
+        ),
+      );
+    }
+
+    if (isObs) {
+      return Container(
+        margin: EdgeInsets.all(gap),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade700,
+          borderRadius: BorderRadius.circular(6),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.28), blurRadius: 4)],
+        ),
+      );
+    }
+
+    if (isBody) {
+      return AnimatedContainer(
+        duration: const Duration(milliseconds: 90),
+        margin: EdgeInsets.all(gap),
+        decoration: BoxDecoration(
+          gradient: isHead
+              ? const LinearGradient(colors: [Color(0xFF64FFDA), Color(0xFF00C853)])
+              : const LinearGradient(colors: [Color(0xFFB9F6CA), Color(0xFF69F0AE)]),
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.14), blurRadius: 6, offset: const Offset(0, 3))],
+        ),
+      );
+    }
+
+    // empty tile — soft rounded tile
+    return Container(
+      margin: EdgeInsets.all(gap),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.92),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.grey.withOpacity(0.10), width: 0.4),
+      ),
+      child: const SizedBox.shrink(),
     );
   }
 
@@ -520,5 +537,30 @@ class _SnakeGameState extends State<SnakeGame> {
       case Difficulty.hard:
         return 'Hard';
     }
+  }
+}
+
+/// Simple reusable glassmorphism card used across UI
+class _GlassCard extends StatelessWidget {
+  final Widget child;
+  const _GlassCard({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.72),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.white.withOpacity(0.45)),
+            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10, offset: const Offset(0, 6))],
+          ),
+          child: child,
+        ),
+      ),
+    );
   }
 }
